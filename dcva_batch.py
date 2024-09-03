@@ -73,7 +73,7 @@ filterNumberTable=[nanVar,nanVar,64,nanVar,nanVar,128,nanVar,nanVar,256,nanVar,\
                             256,256,256,256,256,256,256,256,256,nanVar,128,nanVar,nanVar,64,nanVar,nanVar,1,1]
 
 
-GPU_NUM = 5
+GPU_NUM = 2
 device = torch.device(f'cuda:{GPU_NUM}' if torch.cuda.is_available() else 'cpu')
 torch.cuda.set_device(device)
 print ('Current cuda device ', torch.cuda.current_device())
@@ -93,17 +93,18 @@ torch.backends.cudnn.deterministic = True
 fp = "../../../data/delta/xBD_ori/geotiffs/test/"
 img_path = fp + "images_256/"
 label_path = fp + "targets_256/"
-disaster_lst = ["santa-rosa-wildfire", "hurricane-harvey", "palu-tsunami"]
+# disaster_lst = ["santa-rosa-wildfire", "hurricane-harvey", "palu-tsunami"]
+disaster_lst = ["santa-rosa-wildfire"]
 preChangeImage, postChangeImage, damage_label = load_xBD(img_path, label_path, disaster_lst)
 cd_label = np.zeros(shape=damage_label.shape)
 num_img = preChangeImage.shape[0]
+batch_size = 128
 
 
-#Pre-change and post-change image normalization
+# #Pre-change and post-change image normalization
 # if topPercentSaturationOfImageOk:
 #     preChangeImageNormalized=saturateImage().saturateSomePercentileMultispectral(preChangeImage, topPercentToSaturate)
 #     postChangeImageNormalized=saturateImage().saturateSomePercentileMultispectral(postChangeImage, topPercentToSaturate)
-
 
 imageSizeRow=256
 imageSizeCol=256
@@ -178,6 +179,7 @@ norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_st
 use_dropout=False
 
 
+
 #changing all nets to eval mode
 netForFeatureExtractionLayer23.eval()
 netForFeatureExtractionLayer23.requires_grad=False
@@ -214,11 +216,17 @@ layerWiseFeatureExtractorFunction=[nanVar,nanVar,netForFeatureExtractionLayer2,n
                             nanVar,nanVar,nanVar,netForFeatureExtractionLayer23,nanVar,nanVar,nanVar,nanVar]
 
 
+
 ##Checking validity of feature extraction layers
 validFeatureExtractionLayers=[2,5,8,10,11,23] ##Feature extraction from only these layers have been defined here
 for outputLayer in outputLayerNumbers:
     if outputLayer not in validFeatureExtractionLayers:
         sys.exit('Feature extraction layer is not valid, valid values are 2,5,8,10,11,23')
+        
+validFeatureExtractionLayers=[2,5,8] ##Feature extraction from only these layers have been defined here
+for outputLayer in outputLayerNumbers:
+    if outputLayer not in validFeatureExtractionLayers:
+        sys.exit('Feature extraction layer is not valid, valid values are 2,5,8')
 
 ##Extracting bi-temporal features
 modelInputMean=0.406
@@ -233,44 +241,43 @@ for outputLayerIter in range(0,len(outputLayerNumbers)):
     patchOffsetFactor=int(additionalPatchPixel/sizeReductionForOutputLayer)
     print('Processing layer number:'+str(outputLayerNumber))
 
-    pbar = tqdm(range(len(preChangeImage)))
+    total_batch_count = len(preChangeImage) // batch_size + 1
+    pbar = tqdm(range(total_batch_count))
     i = 0
-    for img1, img2 in zip(preChangeImage, postChangeImage):
-        patchToProcessDate1 = img1
-        patchToProcessDate2 = img2
+    for batch_num in range(total_batch_count):
+        img1_batch = preChangeImage[batch_num*batch_size:(batch_num+1)*batch_size]
+        img2_batch = postChangeImage[batch_num*batch_size:(batch_num+1)*batch_size]
+        
+        batch_size = img1_batch.shape[0]
 
-        timeVector1Feature=np.zeros([imageSizeRow,imageSizeCol,filterNumberForOutputLayer])
-        timeVector2Feature=np.zeros([imageSizeRow,imageSizeCol,filterNumberForOutputLayer])
+        timeVector1Feature=np.zeros([batch_size, imageSizeRow,imageSizeCol,filterNumberForOutputLayer])
+        timeVector2Feature=np.zeros([batch_size, imageSizeRow,imageSizeCol,filterNumberForOutputLayer])
 
         #converting to pytorch varibales and changing dimension for input to net
-        patchToProcessDate1=patchToProcessDate1-modelInputMean
+        img1_batch=img1_batch-modelInputMean
 
-        inputToNetDate1=torch.from_numpy(patchToProcessDate1)
+        inputToNetDate1=torch.from_numpy(img1_batch)
         inputToNetDate1=inputToNetDate1.float()
-        inputToNetDate1=np.swapaxes(inputToNetDate1,0,2)
-        inputToNetDate1=np.swapaxes(inputToNetDate1,1,2)
-        inputToNetDate1=inputToNetDate1.unsqueeze(0).to(device)
+        inputToNetDate1=np.swapaxes(inputToNetDate1,1,3)        
+        inputToNetDate1=np.swapaxes(inputToNetDate1,2,3)
+        inputToNetDate1=inputToNetDate1.to(device)
 
+        img2_batch=img2_batch-modelInputMean
 
-        patchToProcessDate2=patchToProcessDate2-modelInputMean
-
-        inputToNetDate2=torch.from_numpy(patchToProcessDate2)
+        inputToNetDate2=torch.from_numpy(img2_batch)
         inputToNetDate2=inputToNetDate2.float()
-        inputToNetDate2=np.swapaxes(inputToNetDate2,0,2)
-        inputToNetDate2=np.swapaxes(inputToNetDate2,1,2)
-        inputToNetDate2=inputToNetDate2.unsqueeze(0).to(device)
-
+        inputToNetDate2=np.swapaxes(inputToNetDate2,1,3)
+        inputToNetDate2=np.swapaxes(inputToNetDate2,2,3)
+        inputToNetDate2=inputToNetDate2.to(device)
 
         #running model on image 1 and converting features to numpy format
         with torch.no_grad():
             obtainedFeatureVals1=layerWiseFeatureExtractorFunction[outputLayerNumber](inputToNetDate1)
-        obtainedFeatureVals1=obtainedFeatureVals1.squeeze()
         obtainedFeatureVals1=obtainedFeatureVals1.cpu().data.numpy()
 
         #running model on image 2 and converting features to numpy format
         with torch.no_grad():
             obtainedFeatureVals2=layerWiseFeatureExtractorFunction[outputLayerNumber](inputToNetDate2)
-        obtainedFeatureVals2=obtainedFeatureVals2.squeeze()
         obtainedFeatureVals2=obtainedFeatureVals2.cpu().data.numpy()
         #this features are in format (filterNumber, sizeRow, sizeCol)
 
@@ -279,88 +286,97 @@ for outputLayerIter in range(0,len(outputLayerNumbers)):
         obtainedFeatureVals1=np.clip(obtainedFeatureVals1,-1,+1)
         obtainedFeatureVals2=np.clip(obtainedFeatureVals2,-1,+1)
 
-
         for processingFeatureIter in range(0,filterNumberForOutputLayer):
-            timeVector1Feature[:,:,processingFeatureIter]=resize(obtainedFeatureVals1[processingFeatureIter,:,:],(256,256))
-            timeVector2Feature[:,:,processingFeatureIter]=resize(obtainedFeatureVals2[processingFeatureIter,:,:],(256,256))
-
+            timeVector1Feature[:,:,:,processingFeatureIter]=resize(obtainedFeatureVals1[:,processingFeatureIter,:,:],(batch_size,256,256))
+            timeVector2Feature[:,:,:,processingFeatureIter]=resize(obtainedFeatureVals2[:,processingFeatureIter,:,:],(batch_size,256,256))
+        
         timeVectorDifferenceMatrix=timeVector2Feature - timeVector1Feature
-        stdVectorDifference=np.std(timeVectorDifferenceMatrix,axis=(0,1))
+        stdVectorDifference=np.std(timeVectorDifferenceMatrix,axis=(1, 2))
 
         featuresOrderedPerStd=np.argsort(-stdVectorDifference)   #negated array to get argsort result in descending order
-        nonZeroVector=featuresOrderedPerStd[0:featureNumberToRetain]
-        modifiedTimeVector1=timeVector1Feature[:,:,nonZeroVector.astype(int)]
-        modifiedTimeVector2=timeVector2Feature[:,:,nonZeroVector.astype(int)]
+        nonZeroVector=featuresOrderedPerStd[:,0:featureNumberToRetain]
+
+        modifiedTimeVector1=timeVector1Feature[:,:,:,nonZeroVector.astype(int)[0,:]]
+        modifiedTimeVector2=timeVector2Feature[:,:,:,nonZeroVector.astype(int)[0,:]]
 
 
+#         print("normalize features")
         ##Normalize the features (separate for both images)
-        meanVectorsTime1Image=np.mean(modifiedTimeVector1,axis=(0,1))
-        stdVectorsTime1Image=np.std(modifiedTimeVector1,axis=(0,1))
-        stdVectorsTime1Image = stdVectorsTime1Image != 0
-        normalizedModifiedTimeVector1=(modifiedTimeVector1-meanVectorsTime1Image)/stdVectorsTime1Image
+        meanVectorsTime1Image=np.mean(modifiedTimeVector1,axis=(1,2))
+        stdVectorsTime1Image=np.std(modifiedTimeVector1,axis=(1,2))
+        meanVectorsTime2Image=np.mean(modifiedTimeVector2,axis=(1,2))      
+        stdVectorsTime2Image=np.std(modifiedTimeVector2,axis=(1,2))
 
-        meanVectorsTime2Image=np.mean(modifiedTimeVector2,axis=(0,1))      
-        stdVectorsTime2Image=np.std(modifiedTimeVector2,axis=(0,1))
-        stdVectorsTime2Image = stdVectorsTime2Image != 0
-        normalizedModifiedTimeVector2=(modifiedTimeVector2-meanVectorsTime2Image)/stdVectorsTime2Image
+        normalizedModifiedTimeVector1 = np.zeros(modifiedTimeVector1.shape)
+        normalizedModifiedTimeVector2 = np.zeros(modifiedTimeVector2.shape)
 
+        for n in range(modifiedTimeVector2.shape[1] - 1):
+            for k in range(modifiedTimeVector2.shape[2] - 1):
+                normalizedModifiedTimeVector1[:, n, k, :] = (modifiedTimeVector1[:, n, k, :]-meanVectorsTime1Image)/stdVectorsTime1Image
+                normalizedModifiedTimeVector2[:, n, k, :] = (modifiedTimeVector2[:, n, k, :]-meanVectorsTime2Image)/stdVectorsTime2Image
+        
 
         ##feature aggregation across channels
         if outputLayerIter==0:
             timeVector1FeatureAggregated=np.copy(normalizedModifiedTimeVector1)
             timeVector2FeatureAggregated=np.copy(normalizedModifiedTimeVector2)
         else:
-            timeVector1FeatureAggregated=np.concatenate((timeVector1FeatureAggregated,normalizedModifiedTimeVector1),axis=2)
-            timeVector2FeatureAggregated=np.concatenate((timeVector2FeatureAggregated,normalizedModifiedTimeVector2),axis=2)
+            timeVector1FeatureAggregated=np.concatenate((timeVector1FeatureAggregated,normalizedModifiedTimeVector1),axis=3)
+            timeVector2FeatureAggregated=np.concatenate((timeVector2FeatureAggregated,normalizedModifiedTimeVector2),axis=3)
 
-        del obtainedFeatureVals1, obtainedFeatureVals2, timeVector1Feature, timeVector2Feature, inputToNetDate1, inputToNetDate2 
-
-        if outputLayerNumber == last_layer:                
-            absoluteModifiedTimeVectorDifference=\
-                        np.absolute(saturateImage().saturateSomePercentileMultispectral(timeVector1FeatureAggregated,5)-\
-                        saturateImage().saturateSomePercentileMultispectral(timeVector2FeatureAggregated,5))
+        del obtainedFeatureVals1, obtainedFeatureVals2, timeVector1Feature, timeVector2Feature, inputToNetDate1, inputToNetDate2
+        
+        
+        if outputLayerNumber == last_layer:
+            absoluteModifiedTimeVectorDifference=np.absolute(timeVector1FeatureAggregated-timeVector2FeatureAggregated)
 
             #take absolute value for binary CD
-            detectedChangeMap=np.linalg.norm(absoluteModifiedTimeVectorDifference,axis=(2))
+            detectedChangeMap=np.linalg.norm(absoluteModifiedTimeVectorDifference,axis=(3))
             detectedChangeMapNormalized=(detectedChangeMap-np.amin(detectedChangeMap))/(np.amax(detectedChangeMap)-np.amin(detectedChangeMap))
             #plt.figure()
             #plt.imshow(detectedChangeMapNormalized)
 
 
             #detectedChangeMapNormalized=filters.gaussian(detectedChangeMapNormalized,3) #this one is with constant sigma
-            cdMap=np.zeros(detectedChangeMapNormalized.shape, dtype=bool)
+            cdMap_batch=np.zeros(detectedChangeMapNormalized.shape, dtype=bool)
+            nonzero_count = np.count_nonzero(cdMap_batch != 0)
+            zero_count = np.count_nonzero(cdMap_batch == 0)
 
-            if thresholdingStrategy == 'adaptive':
-                for sigma in range(101,202,50):
-                    adaptiveThreshold=2*filters.gaussian(detectedChangeMapNormalized,sigma)
-                    cdMapTemp=(detectedChangeMapNormalized>adaptiveThreshold) 
-                    cdMapTemp=morphology.remove_small_objects(cdMapTemp,min_size=objectMinSize)
-                    cdMap=cdMap | cdMapTemp
-            elif thresholdingStrategy == 'otsu':
-                otsuThreshold=filters.threshold_otsu(detectedChangeMapNormalized)
-                cdMap = (detectedChangeMapNormalized>otsuThreshold) 
-                cdMap=morphology.remove_small_objects(cdMap,min_size=objectMinSize)
-            elif thresholdingStrategy == 'scaledOtsu':
-                otsuThreshold=filters.threshold_otsu(detectedChangeMapNormalized)
-                cdMap = (detectedChangeMapNormalized>otsuScalingFactor*otsuThreshold) 
-                cdMap=morphology.remove_small_objects(cdMap,min_size=objectMinSize)
-            else: 
-                sys.exit('Unknown thresholding strategy')
-            cdMap=morphology.binary_closing(cdMap,morphology.disk(3))
+            for n in range(batch_size):
+                count = (batch_num * batch_size) + n
+                _detectedChangeMapNormalized = detectedChangeMapNormalized[n, :, :]
 
-            
-#             #Creating directory to save result
-#                 resultDirectory = './result/'
-#                 if not os.path.exists(resultDirectory):
-#                     os.makedirs(resultDirectory)
+                if thresholdingStrategy == 'adaptive':
+                    for sigma in range(101,202,50):
+                        adaptiveThreshold=2*filters.gaussian(_detectedChangeMapNormalized,sigma)
+                        cdMapTemp=(_detectedChangeMapNormalized>adaptiveThreshold) 
+                        cdMapTemp=morphology.remove_small_objects(cdMapTemp,min_size=objectMinSize)
+                        cdMap_batch[n,:,:]=cdMap_batch[n,:,:] | cdMapTemp
+                elif thresholdingStrategy == 'otsu':
+                    otsuThreshold=filters.threshold_otsu(_detectedChangeMapNormalized)
+                    cdMap = (_detectedChangeMapNormalized>otsuThreshold) 
+                    cdMap=morphology.remove_small_objects(cdMap,min_size=objectMinSize)
+                elif thresholdingStrategy == 'scaledOtsu':
+                    otsuThreshold=filters.threshold_otsu(_detectedChangeMapNormalized)
+                    cdMap = (_detectedChangeMapNormalized>otsuScalingFactor*otsuThreshold) 
+                    cdMap=morphology.remove_small_objects(cdMap,min_size=objectMinSize)
+                else: 
+                    sys.exit('Unknown thresholding strategy')
+                cdMap_batch[n,:,:]=morphology.binary_closing(cdMap_batch[n,:,:],morphology.disk(3))
 
-#             #Saving the Binary CD result (a .mat file and a .png file)
-#             sio.savemat(resultDirectory+'binaryCdResult.mat', mdict={'cdMap': cdMap})
-#             plt.imsave(resultDirectory+'binaryCdResult_' + str(i) + '.png',np.repeat(np.expand_dims(cdMap,2),3,2).astype(float))
+            ##Creating directory to save result
+    #         resultDirectory = './result/'
+    #         if not os.path.exists(resultDirectory):
+    #             os.makedirs(resultDirectory)
 
-            cd_label[i,:,:] = cdMap
-        i+=1
+            #Saving the Binary CD result (a .mat file and a .png file)
+            # sio.savemat(resultDirectory+'binaryCdResult.mat', mdict={'cdMap': cdMap})
+    #         plt.imsave(resultDirectory+'binaryCdResult_' + str(i) + '.png',np.repeat(np.expand_dims(cdMap,2),3,2).astype(float))
+
+                cd_label[count,:,:] = cdMap_batch[n,:,:]
+                
         pbar.update(1)
+
 
 print("validation")
 acc_mean, P, R, F1 = validation(damage_label, cd_label)
